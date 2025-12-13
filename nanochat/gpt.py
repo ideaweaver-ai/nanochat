@@ -258,15 +258,15 @@ class GPT(nn.Module):
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
-        # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
+        # Separate out all parameters into groups
+        # Muon optimizer requires 2D+ tensors (matrices), so 1D normalization parameters go to AdamW
         matrix_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        # Include embedding_norm and final_norm parameters in matrix_params (they're normalization layers)
-        matrix_params.extend(list(self.embedding_norm.parameters()))
-        matrix_params.extend(list(self.final_norm.parameters()))
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
-        # Create the AdamW optimizer for the embedding and lm_head
+        # Normalization parameters (1D) go to AdamW, not Muon (Muon requires 2D+ tensors)
+        norm_params = list(self.embedding_norm.parameters()) + list(self.final_norm.parameters())
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params)
+        # Create the AdamW optimizer for the embedding, lm_head, and normalization layers
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         if rank == 0:
@@ -274,6 +274,7 @@ class GPT(nn.Module):
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+            dict(params=norm_params, lr=matrix_lr * dmodel_lr_scale),  # Use matrix_lr for normalization layers
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
         AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
