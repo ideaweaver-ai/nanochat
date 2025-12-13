@@ -17,6 +17,12 @@ command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 # create a .venv local virtual environment (if it doesn't exist)
 [ -d ".venv" ] || uv venv
 # install the repo dependencies
+# First, regenerate lock file if transformers was added to pyproject.toml
+if grep -q "transformers" pyproject.toml; then
+    echo "Regenerating lock file to include transformers..."
+    uv lock || echo "Warning: uv lock failed, continuing..."
+fi
+
 uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
@@ -24,19 +30,16 @@ source .venv/bin/activate
 # Verify transformers is installed in the venv
 echo "Verifying dependencies..."
 .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
-    echo "WARNING: transformers not found in venv. Adding to dependencies and reinstalling..."
-    # Add transformers to pyproject.toml if not already there
-    if ! grep -q "transformers" pyproject.toml; then
-        echo "Adding transformers to dependencies..."
-        # This is a fallback - pyproject.toml should already have it
-    fi
-    uv sync --extra gpu
-    .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
-        echo "ERROR: Failed to install transformers. Trying manual install..."
-        .venv/bin/pip install transformers || {
-            echo "ERROR: Failed to install transformers. Exiting."
-            exit 1
-        }
+    echo "WARNING: transformers not found in venv. Installing directly..."
+    # Use uv pip to install directly (bypasses lock file)
+    uv pip install transformers || {
+        echo "ERROR: Failed to install transformers. Exiting."
+        exit 1
+    }
+    # Verify it's installed
+    .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__} installed')" || {
+        echo "ERROR: transformers still not found after installation. Exiting."
+        exit 1
     }
 }
 
