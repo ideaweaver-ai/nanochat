@@ -50,14 +50,37 @@ python -m nanochat.dataset -n 2
 # Base model (pretraining) - TEST VERSION
 # Using very small settings to complete quickly
 
-NPROC_PER_NODE=8
+# Auto-detect number of GPUs
+if command -v nvidia-smi &> /dev/null; then
+    NPROC_PER_NODE=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+    if [ "$NPROC_PER_NODE" -eq 0 ] || [ -z "$NPROC_PER_NODE" ]; then
+        echo "Warning: Could not detect GPUs, defaulting to 1"
+        NPROC_PER_NODE=1
+    fi
+else
+    echo "Warning: nvidia-smi not found, defaulting to 1 GPU"
+    NPROC_PER_NODE=1
+fi
+
+echo "Detected $NPROC_PER_NODE GPU(s), using that for training"
+
+# Verify GPUs are accessible
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; assert torch.cuda.device_count() >= $NPROC_PER_NODE, f'Only {torch.cuda.device_count()} GPU(s) available, but trying to use $NPROC_PER_NODE'" || {
+        echo "Error: GPU count mismatch. Available GPUs: $(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 'unknown')"
+        echo "Falling back to single GPU mode"
+        NPROC_PER_NODE=1
+    }
+fi
 
 echo "Starting TEST pretraining (d16 model, 50 iterations only)..."
 echo "This should take ~5-10 minutes instead of 2-3 hours"
 
 # TEST: Only 50 iterations, smaller eval settings
 # Note: --run must come after -- to avoid conflict with torchrun's --run-path
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
+# Use torchrun only if multiple GPUs, otherwise run directly
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
     --depth=16 \
     --run=$WANDB_RUN \
     --num_iterations=50 \
@@ -65,6 +88,16 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- 
     --eval_tokens=524288 \
     --core_metric_every=-1 \
     --sample_every=50
+else
+    python -m scripts.base_train -- \
+    --depth=16 \
+    --run=$WANDB_RUN \
+    --num_iterations=50 \
+    --eval_every=25 \
+    --eval_tokens=524288 \
+    --core_metric_every=-1 \
+    --sample_every=50
+fi
 
 echo "TEST pretraining complete!"
 
@@ -87,17 +120,31 @@ echo "Starting TEST midtraining (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
-    --run=$WANDB_RUN \
-    --num_iterations=50 \
-    --eval_every=25 \
-    --eval_tokens=524288
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_every=25 \
+        --eval_tokens=524288
+else
+    python -m scripts.mid_train -- \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_every=25 \
+        --eval_tokens=524288
+fi
 
 # Quick eval (minimal problems)
 echo "Running quick chat evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
-    --source=mid \
-    --max-problems=10
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
+        --source=mid \
+        --max-problems=10
+else
+    python -m scripts.chat_eval -- \
+        --source=mid \
+        --max-problems=10
+fi
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning - TEST VERSION
@@ -106,17 +153,31 @@ echo "Starting TEST SFT (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
-    --run=$WANDB_RUN \
-    --num_iterations=50 \
-    --eval_steps=25 \
-    --eval_metrics_max_problems=10
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_steps=25 \
+        --eval_metrics_max_problems=10
+else
+    python -m scripts.chat_sft -- \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_steps=25 \
+        --eval_metrics_max_problems=10
+fi
 
 # Quick eval
 echo "Running quick SFT evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
-    --source=sft \
-    --max-problems=10
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
+        --source=sft \
+        --max-problems=10
+else
+    python -m scripts.chat_eval -- \
+        --source=sft \
+        --max-problems=10
+fi
 
 # -----------------------------------------------------------------------------
 # Generate the full report
