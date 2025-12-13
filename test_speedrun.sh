@@ -56,7 +56,8 @@ echo "Starting TEST pretraining (d16 model, 50 iterations only)..."
 echo "This should take ~5-10 minutes instead of 2-3 hours"
 
 # TEST: Only 50 iterations, smaller eval settings
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train \
+# Note: --run must come after -- to avoid conflict with torchrun's --run-path
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
     --depth=16 \
     --run=$WANDB_RUN \
     --num_iterations=50 \
@@ -68,9 +69,10 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train \
 echo "TEST pretraining complete!"
 
 # Quick evaluation (minimal)
+# Note: base_loss.py uses split_tokens, not eval_tokens
 echo "Running quick evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss \
-    --eval_tokens=524288
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
+    --split_tokens=524288
 
 # Skip base_eval (CORE metric) for speed - it's expensive
 echo "Skipping CORE evaluation for speed (test mode)"
@@ -85,7 +87,7 @@ echo "Starting TEST midtraining (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train \
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
     --run=$WANDB_RUN \
     --num_iterations=50 \
     --eval_every=25 \
@@ -93,7 +95,7 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train \
 
 # Quick eval (minimal problems)
 echo "Running quick chat evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
     --source=mid \
     --max-problems=10
 
@@ -104,7 +106,7 @@ echo "Starting TEST SFT (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft \
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
     --run=$WANDB_RUN \
     --num_iterations=50 \
     --eval_steps=25 \
@@ -112,7 +114,7 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft \
 
 # Quick eval
 echo "Running quick SFT evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
     --source=sft \
     --max-problems=10
 

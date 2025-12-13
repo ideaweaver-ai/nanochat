@@ -48,12 +48,12 @@ python -m nanochat.report reset
 # -----------------------------------------------------------------------------
 # Tokenizer
 
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-
-# Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+# NOTE: Using Qwen3 tokenizer instead of custom Rust BPE tokenizer
+# Rust/Cargo and rustbpe build are no longer needed
+# If you want to use the original Rust BPE tokenizer, uncomment the lines below:
+# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# source "$HOME/.cargo/env"
+# uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
@@ -61,23 +61,27 @@ uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 # so we download 2e9 / 250e6 = 8 data shards at this point
 # each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
 python -m nanochat.dataset -n 8
-# Immediately also kick off downloading more shards in the background while tokenizer trains
-# See comment below for why 240 is the right number here
-python -m nanochat.dataset -n 240 &
+# Immediately also kick off downloading more shards in the background
+# See comment below for why 160 is the right number here (reduced from 240 for d16 model)
+python -m nanochat.dataset -n 160 &
 DATASET_DOWNLOAD_PID=$!
-# train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
-python -m scripts.tok_train --max_chars=2000000000
-# evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
+
+# ============================================================================
+# TOKENIZER: Using Qwen3 tokenizer instead of training custom tokenizer
+# ============================================================================
+# Setup Qwen tokenizer (downloads from HuggingFace, adds special tokens, computes token_bytes.pt)
+# This replaces the custom Rust BPE tokenizer training which saves ~30-60 minutes
+python -m scripts.setup_qwen_tokenizer
+# Note: tok_eval is skipped since we're using a pre-trained tokenizer
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
 
-# The d20 model is 561M parameters.
-# Chinchilla says #tokens = 20X #params, so we need 561e6 * 20 = 11.2B tokens.
-# Assume our tokenizer is 4.8 chars/token, this is 11.2B * 4.8 ~= 54B chars.
-# At 250M chars/shard, this is 54B / 250M ~= 216 shards needed for pretraining.
-# Round up to 240 for safety. At ~100MB/shard, this downloads ~24GB of data to disk.
+# The d16 model with GQA is ~380M parameters (reduced from d20's 561M for efficiency).
+# Chinchilla says #tokens = 20X #params, so we need 380e6 * 20 = 7.6B tokens.
+# Assume our tokenizer is 4.8 chars/token, this is 7.6B * 4.8 ~= 36.5B chars.
+# At 250M chars/shard, this is 36.5B / 250M ~= 146 shards needed for pretraining.
+# Round up to 160 for safety. At ~100MB/shard, this downloads ~16GB of data to disk.
 # (The total number of shards available in the entire dataset is 1822.)
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
@@ -85,8 +89,9 @@ wait $DATASET_DOWNLOAD_PID
 # Number of processes/GPUs to use
 NPROC_PER_NODE=8
 
-# pretrain the d20 model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
+# pretrain the d16 model (reduced from d20 for parameter efficiency: ~561M params vs ~911M)
+# GQA is enabled in base_train.py (num_kv_heads = num_heads // 2) for additional parameter reduction
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --run=$WANDB_RUN
 # evaluate the model on a larger chunk of train/val data and draw some samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
 # evaluate the model on CORE tasks
@@ -127,5 +132,8 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections
+# report.md is the output and will be copied to current directory for convenience
+python -m nanochat.report generate
+e full report by putting together all the sections
 # report.md is the output and will be copied to current directory for convenience
 python -m nanochat.report generate
