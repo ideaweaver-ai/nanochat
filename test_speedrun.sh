@@ -6,6 +6,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
@@ -223,33 +224,47 @@ echo "Starting TEST SFT (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
+# Note: chat_sft doesn't accept max_seq_len config key
+SFT_SUCCESS=false
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
+    if torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
         --run=$WANDB_RUN \
         --num_iterations=50 \
-        --device_batch_size=8 \
+        --device_batch_size=4 \
         --eval_steps=25 \
-        --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
+        --eval_metrics_max_problems=10; then
+        SFT_SUCCESS=true
+    fi
 else
-    "$(pwd)/.venv/bin/python" -m scripts.chat_sft \
+    if "$(pwd)/.venv/bin/python" -m scripts.chat_sft \
         --run=$WANDB_RUN \
         --num_iterations=50 \
-        --max_seq_len=1024 \
         --device_batch_size=2 \
         --eval_steps=25 \
-        --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
+        --eval_metrics_max_problems=10; then
+        SFT_SUCCESS=true
+    fi
 fi
 
-# Quick eval
-echo "Running quick SFT evaluation..."
-if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
-        --source=sft \
-        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
+if [ "$SFT_SUCCESS" != true ]; then
+    echo "ERROR: SFT failed! Check the error messages above."
+    echo "Skipping SFT evaluation..."
+fi
+
+# Quick eval (only if SFT succeeded)
+if [ "$SFT_SUCCESS" = true ]; then
+    echo "Running quick SFT evaluation..."
+    if [ "$NPROC_PER_NODE" -gt 1 ]; then
+        torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
+            --source=sft \
+            --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
+    else
+        "$(pwd)/.venv/bin/python" -m scripts.chat_eval \
+            --source=sft \
+            --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
+    fi
 else
-    "$(pwd)/.venv/bin/python" -m scripts.chat_eval \
-        --source=sft \
-        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
+    echo "Skipping SFT evaluation (SFT failed)"
 fi
 
 # -----------------------------------------------------------------------------

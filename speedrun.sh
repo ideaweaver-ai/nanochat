@@ -12,6 +12,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
@@ -23,9 +24,31 @@ command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 # create a .venv local virtual environment (if it doesn't exist)
 [ -d ".venv" ] || uv venv
 # install the repo dependencies
+# First, regenerate lock file if transformers was added to pyproject.toml
+if grep -q "transformers" pyproject.toml; then
+    echo "Regenerating lock file to include transformers..."
+    uv lock || echo "Warning: uv lock failed, continuing..."
+fi
+
 uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
+
+# Verify transformers is installed in the venv
+echo "Verifying dependencies..."
+.venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
+    echo "WARNING: transformers not found in venv. Installing directly..."
+    # Use uv pip to install directly (bypasses lock file)
+    uv pip install transformers || {
+        echo "ERROR: Failed to install transformers. Exiting."
+        exit 1
+    }
+    # Verify it's installed
+    .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__} installed')" || {
+        echo "ERROR: transformers still not found after installation. Exiting."
+        exit 1
+    }
+}
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -86,16 +109,50 @@ python -m scripts.setup_qwen_tokenizer
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# Number of processes/GPUs to use
-NPROC_PER_NODE=8
+# Auto-detect number of GPUs
+if command -v nvidia-smi &> /dev/null; then
+    NPROC_PER_NODE=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+    if [ "$NPROC_PER_NODE" -eq 0 ] || [ -z "$NPROC_PER_NODE" ]; then
+        echo "Warning: Could not detect GPUs, defaulting to 1"
+        NPROC_PER_NODE=1
+    fi
+else
+    echo "Warning: nvidia-smi not found, defaulting to 1 GPU"
+    NPROC_PER_NODE=1
+fi
+
+echo "Detected $NPROC_PER_NODE GPU(s), using that for training"
+
+# Verify GPUs are accessible
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; assert torch.cuda.device_count() >= $NPROC_PER_NODE, f'Only {torch.cuda.device_count()} GPU(s) available, but trying to use $NPROC_PER_NODE'" || {
+        echo "Error: GPU count mismatch. Available GPUs: $(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 'unknown')"
+        echo "Falling back to single GPU mode"
+        NPROC_PER_NODE=1
+    }
+fi
 
 # pretrain the d16 model (reduced from d20 for parameter efficiency: ~561M params vs ~911M)
 # GQA is enabled in base_train.py (num_kv_heads = num_heads // 2) for additional parameter reduction
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --run=$WANDB_RUN
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_train --depth=16 --run=$WANDB_RUN
+fi
+
 # evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_loss
+fi
+
 # evaluate the model on CORE tasks
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_eval
+fi
 
 # -----------------------------------------------------------------------------
 # Midtraining (teach the model conversation special tokens, tool use, multiple choice)
@@ -105,15 +162,33 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.mid_train --run=$WANDB_RUN
+fi
+
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval -i mid
+fi
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_sft --run=$WANDB_RUN
+fi
+
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval -i sft
+fi
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
@@ -132,8 +207,5 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections
-# report.md is the output and will be copied to current directory for convenience
-python -m nanochat.report generate
-e full report by putting together all the sections
 # report.md is the output and will be copied to current directory for convenience
 python -m nanochat.report generate
