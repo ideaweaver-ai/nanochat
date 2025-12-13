@@ -101,14 +101,17 @@ echo "This should take ~5-10 minutes instead of 2-3 hours"
 # TEST: Only 50 iterations, smaller eval settings
 # Note: --run must come after -- to avoid conflict with torchrun's --run-path
 # Use torchrun only if multiple GPUs, otherwise run directly
+# Use smaller batch size to avoid OOM errors
 TRAINING_SUCCESS=false
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
     if torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
         --depth=16 \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --device_batch_size=8 \
+        --total_batch_size=131072 \
         --eval_every=25 \
-        --eval_tokens=524288 \
+        --eval_tokens=131072 \
         --core_metric_every=-1 \
         --sample_every=50; then
         TRAINING_SUCCESS=true
@@ -116,12 +119,16 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
 else
     # For single GPU, don't use -- separator, pass args directly
     # Ensure we're using the venv's Python
+    # Use very small batch size and shorter sequence length for single GPU to avoid OOM
     if "$(pwd)/.venv/bin/python" -m scripts.base_train \
         --depth=16 \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --max_seq_len=1024 \
+        --device_batch_size=2 \
+        --total_batch_size=4096 \
         --eval_every=25 \
-        --eval_tokens=524288 \
+        --eval_tokens=16384 \
         --core_metric_every=-1 \
         --sample_every=50; then
         TRAINING_SUCCESS=true
@@ -141,10 +148,10 @@ echo "TEST pretraining complete!"
 echo "Running quick evaluation..."
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
-        --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
+        --split_tokens=131072 || echo "Warning: base_loss evaluation failed, continuing..."
 else
     "$(pwd)/.venv/bin/python" -m scripts.base_loss \
-        --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
+        --split_tokens=16384 || echo "Warning: base_loss evaluation failed, continuing..."
 fi
 
 # Skip base_eval (CORE metric) for speed - it's expensive
@@ -165,16 +172,21 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
     if torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --device_batch_size=8 \
+        --total_batch_size=131072 \
         --eval_every=25 \
-        --eval_tokens=524288; then
+        --eval_tokens=131072; then
         MIDTRAIN_SUCCESS=true
     fi
 else
     if "$(pwd)/.venv/bin/python" -m scripts.mid_train \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --max_seq_len=1024 \
+        --device_batch_size=2 \
+        --total_batch_size=4096 \
         --eval_every=25 \
-        --eval_tokens=524288; then
+        --eval_tokens=16384; then
         MIDTRAIN_SUCCESS=true
     fi
 fi
@@ -208,12 +220,15 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --device_batch_size=8 \
         --eval_steps=25 \
         --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
 else
     "$(pwd)/.venv/bin/python" -m scripts.chat_sft \
         --run=$WANDB_RUN \
         --num_iterations=50 \
+        --max_seq_len=1024 \
+        --device_batch_size=2 \
         --eval_steps=25 \
         --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
 fi
