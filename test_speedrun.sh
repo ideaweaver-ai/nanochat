@@ -79,24 +79,36 @@ echo "This should take ~5-10 minutes instead of 2-3 hours"
 # TEST: Only 50 iterations, smaller eval settings
 # Note: --run must come after -- to avoid conflict with torchrun's --run-path
 # Use torchrun only if multiple GPUs, otherwise run directly
+TRAINING_SUCCESS=false
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
-    --depth=16 \
-    --run=$WANDB_RUN \
-    --num_iterations=50 \
-    --eval_every=25 \
-    --eval_tokens=524288 \
-    --core_metric_every=-1 \
-    --sample_every=50
+    if torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
+        --depth=16 \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_every=25 \
+        --eval_tokens=524288 \
+        --core_metric_every=-1 \
+        --sample_every=50; then
+        TRAINING_SUCCESS=true
+    fi
 else
-    python -m scripts.base_train -- \
-    --depth=16 \
-    --run=$WANDB_RUN \
-    --num_iterations=50 \
-    --eval_every=25 \
-    --eval_tokens=524288 \
-    --core_metric_every=-1 \
-    --sample_every=50
+    # For single GPU, don't use -- separator, pass args directly
+    if python -m scripts.base_train \
+        --depth=16 \
+        --run=$WANDB_RUN \
+        --num_iterations=50 \
+        --eval_every=25 \
+        --eval_tokens=524288 \
+        --core_metric_every=-1 \
+        --sample_every=50; then
+        TRAINING_SUCCESS=true
+    fi
+fi
+
+if [ "$TRAINING_SUCCESS" != true ]; then
+    echo "ERROR: Pretraining failed! Check the error messages above."
+    echo "Skipping remaining steps..."
+    exit 1
 fi
 
 echo "TEST pretraining complete!"
@@ -104,8 +116,13 @@ echo "TEST pretraining complete!"
 # Quick evaluation (minimal)
 # Note: base_loss.py uses split_tokens, not eval_tokens
 echo "Running quick evaluation..."
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
-    --split_tokens=524288
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
+        --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
+else
+    python -m scripts.base_loss \
+        --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
+fi
 
 # Skip base_eval (CORE metric) for speed - it's expensive
 echo "Skipping CORE evaluation for speed (test mode)"
@@ -120,18 +137,29 @@ echo "Starting TEST midtraining (50 iterations only)..."
 echo "This should take ~2-5 minutes instead of 30-45 minutes"
 
 # TEST: Only 50 iterations
+MIDTRAIN_SUCCESS=false
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
+    if torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- \
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_every=25 \
-        --eval_tokens=524288
+        --eval_tokens=524288; then
+        MIDTRAIN_SUCCESS=true
+    fi
 else
-    python -m scripts.mid_train -- \
+    if python -m scripts.mid_train -- \
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_every=25 \
-        --eval_tokens=524288
+        --eval_tokens=524288; then
+        MIDTRAIN_SUCCESS=true
+    fi
+fi
+
+if [ "$MIDTRAIN_SUCCESS" != true ]; then
+    echo "ERROR: Midtraining failed! Check the error messages above."
+    echo "Skipping remaining steps..."
+    exit 1
 fi
 
 # Quick eval (minimal problems)
@@ -139,11 +167,11 @@ echo "Running quick chat evaluation..."
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
         --source=mid \
-        --max-problems=10
+        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 else
-    python -m scripts.chat_eval -- \
+    python -m scripts.chat_eval \
         --source=mid \
-        --max-problems=10
+        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 fi
 
 # -----------------------------------------------------------------------------
@@ -158,13 +186,13 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_steps=25 \
-        --eval_metrics_max_problems=10
+        --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
 else
-    python -m scripts.chat_sft -- \
+    python -m scripts.chat_sft \
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_steps=25 \
-        --eval_metrics_max_problems=10
+        --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
 fi
 
 # Quick eval
@@ -172,11 +200,11 @@ echo "Running quick SFT evaluation..."
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- \
         --source=sft \
-        --max-problems=10
+        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 else
-    python -m scripts.chat_eval -- \
+    python -m scripts.chat_eval \
         --source=sft \
-        --max-problems=10
+        --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 fi
 
 # -----------------------------------------------------------------------------
