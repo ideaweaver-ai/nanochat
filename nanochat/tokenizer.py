@@ -380,11 +380,29 @@ class RustBPETokenizer:
 # nanochat-specific convenience functions
 
 def get_tokenizer():
+    """
+    Get tokenizer - now uses Qwen3 tokenizer instead of custom Rust BPE.
+    
+    First tries to load from saved directory (after setup_qwen_tokenizer.py),
+    otherwise loads directly from HuggingFace.
+    """
     from nanochat.common import get_base_dir
+    from nanochat.qwen_tokenizer import QwenTokenizer
+    
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
-    return RustBPETokenizer.from_directory(tokenizer_dir)
+    
+    # Check if Qwen tokenizer exists in directory (after setup)
+    tokenizer_config_path = os.path.join(tokenizer_dir, "tokenizer_config.json")
+    if os.path.exists(tokenizer_config_path):
+        # Load from saved directory
+        from transformers import AutoTokenizer
+        hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, trust_remote_code=True)
+        return QwenTokenizer(hf_tokenizer, add_special_tokens=False)  # Special tokens already added
+    else:
+        # Load directly from HuggingFace (first time, or if setup wasn't run)
+        print("Loading Qwen tokenizer from HuggingFace (first time setup)...")
+        return QwenTokenizer.from_pretrained("Qwen/Qwen2.5-7B", add_special_tokens=True)
 
 def get_token_bytes(device="cpu"):
     import torch
