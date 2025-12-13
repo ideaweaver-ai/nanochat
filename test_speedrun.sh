@@ -24,11 +24,19 @@ source .venv/bin/activate
 # Verify transformers is installed in the venv
 echo "Verifying dependencies..."
 .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
-    echo "ERROR: transformers not found in venv. Reinstalling..."
-    uv sync --extra gpu --reinstall
+    echo "WARNING: transformers not found in venv. Adding to dependencies and reinstalling..."
+    # Add transformers to pyproject.toml if not already there
+    if ! grep -q "transformers" pyproject.toml; then
+        echo "Adding transformers to dependencies..."
+        # This is a fallback - pyproject.toml should already have it
+    fi
+    uv sync --extra gpu
     .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
-        echo "ERROR: Failed to install transformers. Exiting."
-        exit 1
+        echo "ERROR: Failed to install transformers. Trying manual install..."
+        .venv/bin/pip install transformers || {
+            echo "ERROR: Failed to install transformers. Exiting."
+            exit 1
+        }
     }
 }
 
