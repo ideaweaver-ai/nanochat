@@ -21,6 +21,17 @@ uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
 
+# Verify transformers is installed in the venv
+echo "Verifying dependencies..."
+.venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
+    echo "ERROR: transformers not found in venv. Reinstalling..."
+    uv sync --extra gpu --reinstall
+    .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
+        echo "ERROR: Failed to install transformers. Exiting."
+        exit 1
+    }
+}
+
 # -----------------------------------------------------------------------------
 # wandb setup
 if [ -z "$WANDB_RUN" ]; then
@@ -93,7 +104,8 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
     fi
 else
     # For single GPU, don't use -- separator, pass args directly
-    if python -m scripts.base_train \
+    # Ensure we're using the venv's Python
+    if "$(pwd)/.venv/bin/python" -m scripts.base_train \
         --depth=16 \
         --run=$WANDB_RUN \
         --num_iterations=50 \
@@ -120,7 +132,7 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
         --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
 else
-    python -m scripts.base_loss \
+    "$(pwd)/.venv/bin/python" -m scripts.base_loss \
         --split_tokens=524288 || echo "Warning: base_loss evaluation failed, continuing..."
 fi
 
@@ -147,7 +159,7 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
         MIDTRAIN_SUCCESS=true
     fi
 else
-    if python -m scripts.mid_train -- \
+    if "$(pwd)/.venv/bin/python" -m scripts.mid_train \
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_every=25 \
@@ -169,7 +181,7 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
         --source=mid \
         --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 else
-    python -m scripts.chat_eval \
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval \
         --source=mid \
         --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 fi
@@ -188,7 +200,7 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
         --eval_steps=25 \
         --eval_metrics_max_problems=10 || echo "Warning: chat_sft failed, continuing..."
 else
-    python -m scripts.chat_sft \
+    "$(pwd)/.venv/bin/python" -m scripts.chat_sft \
         --run=$WANDB_RUN \
         --num_iterations=50 \
         --eval_steps=25 \
@@ -202,7 +214,7 @@ if [ "$NPROC_PER_NODE" -gt 1 ]; then
         --source=sft \
         --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 else
-    python -m scripts.chat_eval \
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval \
         --source=sft \
         --max-problems=10 || echo "Warning: chat_eval failed, continuing..."
 fi
