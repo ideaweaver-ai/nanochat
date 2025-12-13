@@ -145,13 +145,20 @@ echo "TEST pretraining complete!"
 
 # Quick evaluation (minimal)
 # Note: base_loss.py uses split_tokens, not eval_tokens
+# split_tokens must be divisible by (device_batch_size * sequence_len * world_size)
+# For single GPU: device_batch_size=2, sequence_len=1024, world_size=1 => 2048 tokens per step
+# So split_tokens should be a multiple of 2048
 echo "Running quick evaluation..."
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    # For multi-GPU: device_batch_size=8, sequence_len=2048, world_size=8 => 131072 tokens per step
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- \
         --split_tokens=131072 || echo "Warning: base_loss evaluation failed, continuing..."
 else
+    # For single GPU: device_batch_size=2, sequence_len=1024, world_size=1 => 2048 tokens per step
+    # split_tokens must be divisible by 2048, so use 8192 (4 steps)
     "$(pwd)/.venv/bin/python" -m scripts.base_loss \
-        --split_tokens=16384 || echo "Warning: base_loss evaluation failed, continuing..."
+        --device_batch_size=2 \
+        --split_tokens=8192 || echo "Warning: base_loss evaluation failed, continuing..."
 fi
 
 # Skip base_eval (CORE metric) for speed - it's expensive
