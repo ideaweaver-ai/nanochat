@@ -260,11 +260,32 @@ class GPT(nn.Module):
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into groups
         # Muon optimizer requires 2D+ tensors (matrices), so 1D normalization parameters go to AdamW
-        matrix_params = list(self.transformer.h.parameters())
+        all_block_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         # Normalization parameters (1D) go to AdamW, not Muon (Muon requires 2D+ tensors)
         norm_params = list(self.embedding_norm.parameters()) + list(self.final_norm.parameters())
+        
+        # Filter out 1D parameters from blocks (RMSNorm weights) - they go to AdamW, not Muon
+        # Muon requires 2D+ tensors (matrices), so we must separate 1D from 2D+ parameters
+        matrix_params = []
+        block_norm_params = []
+        for p in all_block_params:
+            # Check parameter shape: 2D+ (e.g., [out_features, in_features]) go to Muon
+            # 1D (e.g., [features]) go to AdamW
+            if p.ndim >= 2:  # 2D+ tensors (matrices) go to Muon
+                matrix_params.append(p)
+            elif p.ndim == 1:  # 1D tensors (normalization weights) go to AdamW
+                block_norm_params.append(p)
+            else:  # 0D scalars (shouldn't happen, but handle gracefully)
+                block_norm_params.append(p)
+        
+        # Combine all normalization parameters (from blocks + embedding/final norms)
+        norm_params.extend(block_norm_params)
+        
+        if rank == 0:
+            print(f"Parameter distribution: {len(matrix_params)} matrix params (Muon), {len(norm_params)} norm params (AdamW), {len(embedding_params)} embedding params (AdamW), {len(lm_head_params)} lm_head params (AdamW)")
+        
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params)
         # Create the AdamW optimizer for the embedding, lm_head, and normalization layers
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
