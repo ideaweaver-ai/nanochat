@@ -75,7 +75,7 @@ if [ $RESULT -eq 0 ]; then
     echo ""
     echo "=== ✓ CUDA IS NOW WORKING! ==="
     echo ""
-    echo "Your 8x H100 GPUs are now accessible!"
+    echo "Your GPU(s) are now accessible!"
     echo "Run speedrun.sh again - it will use all GPUs now."
 else
     echo ""
