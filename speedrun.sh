@@ -45,6 +45,12 @@ uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
 
+# Verify PyTorch CUDA support after installation
+echo "Verifying PyTorch CUDA installation..."
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')" || {
+    echo "Warning: Could not verify PyTorch installation"
+}
+
 # Verify transformers is installed in the venv
 echo "Verifying dependencies..."
 .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
@@ -120,28 +126,88 @@ python -m scripts.setup_qwen_tokenizer
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# Auto-detect number of GPUs
+# Auto-detect number of GPUs and verify PyTorch can access them
+echo "Checking GPU availability..."
+
+# Check for CUDA_VISIBLE_DEVICES - if set incorrectly, it can cause issues
+if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+    echo "⚠ CUDA_VISIBLE_DEVICES is set to: $CUDA_VISIBLE_DEVICES"
+    echo "  If you're seeing CUDA errors, try unsetting it: unset CUDA_VISIBLE_DEVICES"
+fi
+
+# First check if nvidia-smi can see GPUs
+NVIDIA_GPU_COUNT=0
 if command -v nvidia-smi &> /dev/null; then
-    NPROC_PER_NODE=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
-    if [ "$NPROC_PER_NODE" -eq 0 ] || [ -z "$NPROC_PER_NODE" ]; then
-        echo "Warning: Could not detect GPUs, defaulting to 1"
-        NPROC_PER_NODE=1
+    NVIDIA_GPU_COUNT=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+    if [ "$NVIDIA_GPU_COUNT" -gt 0 ]; then
+        echo "✓ nvidia-smi detected $NVIDIA_GPU_COUNT GPU(s)"
+        # Show CUDA version from nvidia-smi
+        CUDA_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+        echo "  Driver version: $CUDA_VERSION"
+    else
+        echo "⚠ nvidia-smi found but no GPUs detected"
     fi
 else
-    echo "Warning: nvidia-smi not found, defaulting to 1 GPU"
+    echo "⚠ nvidia-smi not found"
+fi
+
+# Now check if PyTorch can access CUDA
+echo "Checking PyTorch CUDA support..."
+PYTORCH_CUDA_AVAILABLE=$(python -c "import torch; print('yes' if torch.cuda.is_available() else 'no')" 2>/dev/null || echo "error")
+PYTORCH_CUDA_COUNT=0
+
+if [ "$PYTORCH_CUDA_AVAILABLE" = "yes" ]; then
+    PYTORCH_CUDA_COUNT=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
+    PYTORCH_CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "unknown")
+    echo "✓ PyTorch CUDA is available"
+    echo "  PyTorch can see $PYTORCH_CUDA_COUNT GPU(s)"
+    echo "  PyTorch CUDA version: $PYTORCH_CUDA_VERSION"
+    
+    # Use the minimum of what nvidia-smi sees and what PyTorch sees
+    if [ "$NVIDIA_GPU_COUNT" -gt 0 ] && [ "$PYTORCH_CUDA_COUNT" -gt 0 ]; then
+        NPROC_PER_NODE=$((NVIDIA_GPU_COUNT < PYTORCH_CUDA_COUNT ? NVIDIA_GPU_COUNT : PYTORCH_CUDA_COUNT))
+    else
+        NPROC_PER_NODE=$PYTORCH_CUDA_COUNT
+    fi
+elif [ "$PYTORCH_CUDA_AVAILABLE" = "error" ]; then
+    echo "✗ Error checking PyTorch CUDA availability"
+    echo "  This might indicate PyTorch is not installed correctly"
     NPROC_PER_NODE=1
-fi
-
-echo "Detected $NPROC_PER_NODE GPU(s), using that for training"
-
-# Verify GPUs are accessible
-if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; assert torch.cuda.device_count() >= $NPROC_PER_NODE, f'Only {torch.cuda.device_count()} GPU(s) available, but trying to use $NPROC_PER_NODE'" || {
-        echo "Error: GPU count mismatch. Available GPUs: $(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 'unknown')"
-        echo "Falling back to single GPU mode"
+else
+    echo "✗ PyTorch CUDA is NOT available"
+    if [ "$NVIDIA_GPU_COUNT" -gt 0 ]; then
+        echo "  Warning: nvidia-smi sees $NVIDIA_GPU_COUNT GPU(s) but PyTorch cannot access them"
+        echo "  Possible causes:"
+        echo "    1. PyTorch was installed without CUDA support (CPU-only version)"
+        echo "    2. CUDA version mismatch between PyTorch and system"
+        echo "    3. CUDA libraries not in LD_LIBRARY_PATH"
+        echo ""
+        echo "  Diagnostic info:"
+        python -c "import torch; print(f'  PyTorch version: {torch.__version__}'); print(f'  CUDA compiled version: {torch.version.cuda if hasattr(torch.version, \"cuda\") else \"N/A\"}')" 2>/dev/null || echo "  Could not get PyTorch version"
+        echo ""
+        echo "  Attempting to reinstall PyTorch with CUDA support..."
+        uv pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 2>/dev/null || {
+            echo "  Failed to reinstall. Falling back to CPU mode."
+        }
+        # Re-check after reinstall
+        PYTORCH_CUDA_AVAILABLE=$(python -c "import torch; print('yes' if torch.cuda.is_available() else 'no')" 2>/dev/null || echo "no")
+        if [ "$PYTORCH_CUDA_AVAILABLE" = "yes" ]; then
+            PYTORCH_CUDA_COUNT=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
+            NPROC_PER_NODE=$PYTORCH_CUDA_COUNT
+            echo "  ✓ PyTorch CUDA is now available with $PYTORCH_CUDA_COUNT GPU(s)"
+        else
+            NPROC_PER_NODE=1
+            echo "  ✗ Still cannot access CUDA. Will use CPU mode (single process)"
+        fi
+    else
         NPROC_PER_NODE=1
-    }
+        echo "  No GPUs detected. Using CPU mode (single process)"
+    fi
 fi
+
+echo ""
+echo "Using $NPROC_PER_NODE process(es) for training"
 
 # pretrain the d16 model (reduced from d20 for parameter efficiency: ~561M params vs ~911M)
 # GQA is enabled in base_train.py (num_kv_heads = num_heads // 2) for additional parameter reduction
