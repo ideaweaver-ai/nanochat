@@ -194,16 +194,24 @@ elif [ "$PYTORCH_CUDA_AVAILABLE" = "error" ]; then
 else
     echo "✗ PyTorch CUDA is NOT available"
     if [ "$NVIDIA_GPU_COUNT" -gt 0 ]; then
-        echo "  Warning: nvidia-smi sees $NVIDIA_GPU_COUNT GPU(s) but PyTorch cannot access them"
-        echo "  Possible causes:"
-        echo "    1. PyTorch was installed without CUDA support (CPU-only version)"
-        echo "    2. CUDA version mismatch between PyTorch and system"
-        echo "    3. CUDA libraries not in LD_LIBRARY_PATH"
+        echo "  ⚠ CRITICAL: nvidia-smi sees $NVIDIA_GPU_COUNT GPU(s) but PyTorch cannot access them"
+        echo ""
+        echo "  Root cause: CUDA driver cannot initialize (cuInit fails with error 999)"
+        echo "  This indicates a container GPU access configuration issue."
+        echo ""
+        echo "  Solution: Restart container with proper GPU runtime:"
+        echo "    docker run --gpus all --runtime=nvidia \\"
+        echo "      -e NVIDIA_VISIBLE_DEVICES=all \\"
+        echo "      -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \\"
+        echo "      ..."
+        echo ""
+        echo "  For now, falling back to CPU mode (very slow)."
+        echo "  See CUDA_FIX_SUMMARY.md for details."
         echo ""
         echo "  Diagnostic info:"
         python -c "import torch; print(f'  PyTorch version: {torch.__version__}'); print(f'  CUDA compiled version: {torch.version.cuda if hasattr(torch.version, \"cuda\") else \"N/A\"}')" 2>/dev/null || echo "  Could not get PyTorch version"
         echo ""
-        echo "  Attempting to fix CUDA version mismatch..."
+        echo "  Attempting to fix CUDA version mismatch (may not work if container issue)..."
         # Detect system CUDA version and install compatible PyTorch
         if command -v nvcc &> /dev/null; then
             CUDA_VERSION=$(nvcc --version | grep "release" | sed 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/' | head -1)
