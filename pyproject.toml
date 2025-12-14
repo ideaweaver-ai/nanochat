@@ -44,11 +44,12 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# target torch to cuda 12.8 or CPU
+# target torch to cuda 12.1 (compatible with CUDA 12.4.1 runtime) or CPU
+# Note: CUDA 12.1 PyTorch builds work with CUDA 12.4.1 runtime (backward compatible)
 [tool.uv.sources]
 torch = [  
     { index = "pytorch-cpu", extra = "cpu" },  
-    { index = "pytorch-cu128", extra = "gpu" },  
+    { index = "pytorch-cu121", extra = "gpu" },  
 ]
 
 [[tool.uv.index]]  
@@ -57,16 +58,16 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true  
   
 [[tool.uv.index]]  
-name = "pytorch-cu128"  
-url = "https://download.pytorch.org/whl/cu128"  
+name = "pytorch-cu121"  
+url = "https://download.pytorch.org/whl/cu121"  
 explicit = true
 
 [project.optional-dependencies]  
 cpu = [  
-    "torch>=2.8.0",  
+    "torch>=2.4.0",  
 ]  
 gpu = [  
-    "torch>=2.8.0",  
+    "torch>=2.4.0",  # PyTorch 2.4.0 with CUDA 12.1 is compatible with CUDA 12.4.1 runtime
 ]  
   
 [tool.uv]  

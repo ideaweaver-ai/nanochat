@@ -245,8 +245,12 @@ else
             PYTORCH_CUDA="cu121"  # Default for H100
         fi
         echo "  Installing PyTorch for CUDA $PYTORCH_CUDA..."
+        echo "  For RunPod containers: Using PyTorch 2.4.0 with CUDA 12.1 (compatible with CUDA 12.4.1)"
         uv pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
-        uv pip install torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$PYTORCH_CUDA" 2>/dev/null || {
+        # For RunPod with CUDA 12.4.1, use PyTorch 2.4.0 with CUDA 12.1 (compatible)
+        uv pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+            --index-url https://download.pytorch.org/whl/cu121 \
+            --no-cache-dir 2>/dev/null || {
             echo "  Failed to reinstall. Falling back to CPU mode."
         }
         # Re-check after reinstall
