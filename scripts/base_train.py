@@ -76,6 +76,16 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
+# If running on CPU/MPS and Python dev headers might be missing, suppress torch.compile errors
+# This allows the script to run even without python3-dev installed
+if device_type in ["cpu", "mps"]:
+    try:
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        print0("Note: Suppressing torch.compile errors for CPU/MPS mode (Python dev headers may be missing)")
+    except:
+        pass
+
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
@@ -129,7 +139,16 @@ if resuming:
     del model_data # free up this memory after the copy
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+# Try to compile the model for better performance, but fall back to eager if compilation fails
+# (e.g., if Python dev headers are missing or on CPU without proper setup)
+try:
+    model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+    print0("Model compiled successfully with torch.compile()")
+except Exception as e:
+    print0(f"Warning: torch.compile() failed ({type(e).__name__}), falling back to eager mode")
+    print0(f"  Error: {e}")
+    print0("  This is OK - model will run in eager mode (slightly slower but functional)")
+    # Model stays uncompiled (eager mode)
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()

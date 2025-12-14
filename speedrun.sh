@@ -23,6 +23,25 @@ if [ -d "/usr/local/nvidia/lib64" ] || [ -d "/usr/local/nvidia/lib" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# Install system dependencies needed for PyTorch compilation (Python dev headers)
+# Required for torch.compile() to work, especially in CPU mode
+if ! [ -f "/usr/include/python3.10/Python.h" ] && ! [ -f "/usr/include/python3.11/Python.h" ] && ! [ -f "/usr/include/python3.12/Python.h" ]; then
+    echo "Installing Python development headers (needed for torch.compile)..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq && apt-get install -y python3-dev build-essential 2>/dev/null || {
+            echo "Warning: Could not install python3-dev. torch.compile() may fail."
+            echo "  You can install manually: apt-get install -y python3-dev build-essential"
+        }
+    elif command -v yum &> /dev/null; then
+        yum install -y python3-devel gcc gcc-c++ 2>/dev/null || {
+            echo "Warning: Could not install python3-devel. torch.compile() may fail."
+        }
+    else
+        echo "Warning: Cannot auto-install python3-dev. Please install manually."
+    fi
+fi
+
+# -----------------------------------------------------------------------------
 # Python venv setup with uv
 
 # install uv (if not already installed)
