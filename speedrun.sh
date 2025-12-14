@@ -185,9 +185,23 @@ else
         echo "  Diagnostic info:"
         python -c "import torch; print(f'  PyTorch version: {torch.__version__}'); print(f'  CUDA compiled version: {torch.version.cuda if hasattr(torch.version, \"cuda\") else \"N/A\"}')" 2>/dev/null || echo "  Could not get PyTorch version"
         echo ""
-        echo "  Attempting to reinstall PyTorch with CUDA support..."
+        echo "  Attempting to fix CUDA version mismatch..."
+        # Detect system CUDA version and install compatible PyTorch
+        if command -v nvcc &> /dev/null; then
+            CUDA_VERSION=$(nvcc --version | grep "release" | sed 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/' | head -1)
+            echo "  System CUDA version: $CUDA_VERSION"
+            # CUDA 12.4 is compatible with PyTorch cu121
+            if [[ "$CUDA_VERSION" == "12."* ]]; then
+                PYTORCH_CUDA="cu121"
+            else
+                PYTORCH_CUDA="cu121"  # Default fallback
+            fi
+        else
+            PYTORCH_CUDA="cu121"  # Default for H100
+        fi
+        echo "  Installing PyTorch for CUDA $PYTORCH_CUDA..."
         uv pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 2>/dev/null || {
+        uv pip install torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$PYTORCH_CUDA" 2>/dev/null || {
             echo "  Failed to reinstall. Falling back to CPU mode."
         }
         # Re-check after reinstall
