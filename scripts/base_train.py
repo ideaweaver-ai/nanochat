@@ -76,15 +76,18 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
-# If running on CPU/MPS and Python dev headers might be missing, suppress torch.compile errors
-# This allows the script to run even without python3-dev installed
-if device_type in ["cpu", "mps"]:
-    try:
-        import torch._dynamo
-        torch._dynamo.config.suppress_errors = True
-        print0("Note: Suppressing torch.compile errors for CPU/MPS mode (Python dev headers may be missing)")
-    except:
-        pass
+# Suppress torch.compile errors globally to allow fallback to eager mode
+# This is needed because Triton compilation can fail due to missing headers or other issues
+# The model will still work in eager mode (slightly slower but functional)
+try:
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+    if device_type in ["cpu", "mps"]:
+        print0("Note: Suppressing torch.compile errors (Python dev headers may be missing)")
+    else:
+        print0("Note: Suppressing torch.compile errors (Triton compilation may fail, will fallback to eager mode)")
+except:
+    pass
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
