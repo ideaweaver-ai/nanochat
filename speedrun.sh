@@ -12,6 +12,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
@@ -34,9 +35,31 @@ fi
 # create a .venv local virtual environment (if it doesn't exist)
 [ -d ".venv" ] || uv venv
 # install the repo dependencies
+# First, regenerate lock file if transformers was added to pyproject.toml
+if grep -q "transformers" pyproject.toml; then
+    echo "Regenerating lock file to include transformers..."
+    uv lock || echo "Warning: uv lock failed, continuing..."
+fi
+
 uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
+
+# Verify transformers is installed in the venv
+echo "Verifying dependencies..."
+.venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__}')" || {
+    echo "WARNING: transformers not found in venv. Installing directly..."
+    # Use uv pip to install directly (bypasses lock file)
+    uv pip install transformers || {
+        echo "ERROR: Failed to install transformers. Exiting."
+        exit 1
+    }
+    # Verify it's installed
+    .venv/bin/python -c "import transformers; print(f'✓ transformers {transformers.__version__} installed')" || {
+        echo "ERROR: transformers still not found after installation. Exiting."
+        exit 1
+    }
+}
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -59,12 +82,12 @@ python -m nanochat.report reset
 # -----------------------------------------------------------------------------
 # Tokenizer
 
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-
-# Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+# NOTE: Using Qwen3 tokenizer instead of custom Rust BPE tokenizer
+# Rust/Cargo and rustbpe build are no longer needed
+# If you want to use the original Rust BPE tokenizer, uncomment the lines below:
+# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# source "$HOME/.cargo/env"
+# uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
@@ -72,36 +95,75 @@ uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 # so we download 2e9 / 250e6 = 8 data shards at this point
 # each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
 python -m nanochat.dataset -n 8
-# Immediately also kick off downloading more shards in the background while tokenizer trains
-# See comment below for why 240 is the right number here
-python -m nanochat.dataset -n 240 &
+# Immediately also kick off downloading more shards in the background
+# See comment below for why 160 is the right number here (reduced from 240 for d16 model)
+python -m nanochat.dataset -n 160 &
 DATASET_DOWNLOAD_PID=$!
-# train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
-python -m scripts.tok_train --max_chars=2000000000
-# evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
+
+# ============================================================================
+# TOKENIZER: Using Qwen3 tokenizer instead of training custom tokenizer
+# ============================================================================
+# Setup Qwen tokenizer (downloads from HuggingFace, adds special tokens, computes token_bytes.pt)
+# This replaces the custom Rust BPE tokenizer training which saves ~30-60 minutes
+python -m scripts.setup_qwen_tokenizer
+# Note: tok_eval is skipped since we're using a pre-trained tokenizer
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
 
-# The d20 model is 561M parameters.
-# Chinchilla says #tokens = 20X #params, so we need 561e6 * 20 = 11.2B tokens.
-# Assume our tokenizer is 4.8 chars/token, this is 11.2B * 4.8 ~= 54B chars.
-# At 250M chars/shard, this is 54B / 250M ~= 216 shards needed for pretraining.
-# Round up to 240 for safety. At ~100MB/shard, this downloads ~24GB of data to disk.
+# The d16 model with GQA is ~380M parameters (reduced from d20's 561M for efficiency).
+# Chinchilla says #tokens = 20X #params, so we need 380e6 * 20 = 7.6B tokens.
+# Assume our tokenizer is 4.8 chars/token, this is 7.6B * 4.8 ~= 36.5B chars.
+# At 250M chars/shard, this is 36.5B / 250M ~= 146 shards needed for pretraining.
+# Round up to 160 for safety. At ~100MB/shard, this downloads ~16GB of data to disk.
 # (The total number of shards available in the entire dataset is 1822.)
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# Number of processes/GPUs to use
-NPROC_PER_NODE=8
+# Auto-detect number of GPUs
+if command -v nvidia-smi &> /dev/null; then
+    NPROC_PER_NODE=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+    if [ "$NPROC_PER_NODE" -eq 0 ] || [ -z "$NPROC_PER_NODE" ]; then
+        echo "Warning: Could not detect GPUs, defaulting to 1"
+        NPROC_PER_NODE=1
+    fi
+else
+    echo "Warning: nvidia-smi not found, defaulting to 1 GPU"
+    NPROC_PER_NODE=1
+fi
 
-# pretrain the d20 model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
+echo "Detected $NPROC_PER_NODE GPU(s), using that for training"
+
+# Verify GPUs are accessible
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; assert torch.cuda.device_count() >= $NPROC_PER_NODE, f'Only {torch.cuda.device_count()} GPU(s) available, but trying to use $NPROC_PER_NODE'" || {
+        echo "Error: GPU count mismatch. Available GPUs: $(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 'unknown')"
+        echo "Falling back to single GPU mode"
+        NPROC_PER_NODE=1
+    }
+fi
+
+# pretrain the d16 model (reduced from d20 for parameter efficiency: ~561M params vs ~911M)
+# GQA is enabled in base_train.py (num_kv_heads = num_heads // 2) for additional parameter reduction
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_train --depth=16 --run=$WANDB_RUN
+fi
+
 # evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_loss
+fi
+
 # evaluate the model on CORE tasks
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
+else
+    "$(pwd)/.venv/bin/python" -m scripts.base_eval
+fi
 
 # -----------------------------------------------------------------------------
 # Midtraining (teach the model conversation special tokens, tool use, multiple choice)
@@ -111,15 +173,33 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.mid_train --run=$WANDB_RUN
+fi
+
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval -i mid
+fi
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_sft --run=$WANDB_RUN
+fi
+
+if [ "$NPROC_PER_NODE" -gt 1 ]; then
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+else
+    "$(pwd)/.venv/bin/python" -m scripts.chat_eval -i sft
+fi
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"

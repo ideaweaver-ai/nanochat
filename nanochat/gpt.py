@@ -4,9 +4,11 @@ Notable features:
 - rotary embeddings (and no positional embeddings)
 - QK norm
 - untied weights for token embedding and lm_head
-- relu^2 activation in MLP
-- norm after token embedding
-- no learnable params in rmsnorm
+- SwiGLU activation in FeedForward (Qwen3 style)
+- embedding scaling (sqrt(d_model)) - industry standard
+- learnable RMSNorm in transformer blocks (Qwen3 style)
+- learnable RMSNorm for embedding and final normalization (Qwen3 style)
+- functional RMSNorm for QK norm only
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
 """
@@ -35,7 +37,23 @@ class GPTConfig:
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
+    # Used for QK normalization and final normalization
     return F.rms_norm(x, (x.size(-1),))
+
+
+class RMSNorm(nn.Module):
+    """Learnable RMSNorm with learnable scaling parameter (Qwen3 style)"""
+    def __init__(self, emb_dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(emb_dim))
+
+    def forward(self, x):
+        input_dtype = x.dtype
+        x_f = x.float()
+        var = x_f.pow(2).mean(dim=-1, keepdim=True)
+        x_norm = x_f * torch.rsqrt(var + self.eps)
+        return (x_norm * self.weight.float()).to(input_dtype)
 
 
 def apply_rotary_emb(x, cos, sin):
@@ -122,15 +140,39 @@ class MLP(nn.Module):
         return x
 
 
+class SwiGLUFeedForward(nn.Module):
+    """SwiGLU FeedForward Network (Qwen3 style)"""
+    def __init__(self, d_model, d_ff, dtype=None):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_ff, bias=False, dtype=dtype)
+        self.up_proj = nn.Linear(d_model, d_ff, bias=False, dtype=dtype)
+        self.down_proj = nn.Linear(d_ff, d_model, bias=False, dtype=dtype)
+
+    def forward(self, x):
+        gate = F.silu(self.gate_proj(x))  # SiLU activation
+        up = self.up_proj(x)
+        return self.down_proj(gate * up)  # Gated multiplication
+
+
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
-        self.mlp = MLP(config)
+        # Use SwiGLUFeedForward instead of MLP (Qwen3 style)
+        self.mlp = SwiGLUFeedForward(config.n_embd, 4 * config.n_embd, dtype=None)
+        # Use learnable RMSNorm instead of functional norm (Qwen3 style)
+        self.norm1 = RMSNorm(config.n_embd, eps=1e-6)
+        self.norm2 = RMSNorm(config.n_embd, eps=1e-6)
 
     def forward(self, x, cos_sin, kv_cache):
-        x = x + self.attn(norm(x), cos_sin, kv_cache)
-        x = x + self.mlp(norm(x))
+        # Pre-norm attention (Qwen3 style)
+        attn_out = self.attn(self.norm1(x), cos_sin, kv_cache)
+        x = x + attn_out
+
+        # Pre-norm feedforward (Qwen3 style)
+        ff_out = self.mlp(self.norm2(x))
+        x = x + ff_out
+
         return x
 
 
@@ -143,6 +185,9 @@ class GPT(nn.Module):
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # Use learnable RMSNorm for embedding and final normalization (Qwen3 style, consistent with blocks)
+        self.embedding_norm = RMSNorm(config.n_embd, eps=1e-6)
+        self.final_norm = RMSNorm(config.n_embd, eps=1e-6)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them, but assert fail if we ever reach that amount.
@@ -157,9 +202,10 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
         # zero out classifier weights
         torch.nn.init.zeros_(self.lm_head.weight)
-        # zero out c_proj weights in all blocks
+        # zero out output projection weights in all blocks
         for block in self.transformer.h:
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            # For SwiGLU, zero out down_proj (equivalent to c_proj in old MLP)
+            torch.nn.init.zeros_(block.mlp.down_proj.weight)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
@@ -212,12 +258,36 @@ class GPT(nn.Module):
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
-        # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
-        matrix_params = list(self.transformer.h.parameters())
+        # Separate out all parameters into groups
+        # Muon optimizer requires 2D+ tensors (matrices), so 1D normalization parameters go to AdamW
+        all_block_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
-        # Create the AdamW optimizer for the embedding and lm_head
+        # Normalization parameters (1D) go to AdamW, not Muon (Muon requires 2D+ tensors)
+        norm_params = list(self.embedding_norm.parameters()) + list(self.final_norm.parameters())
+        
+        # Filter out 1D parameters from blocks (RMSNorm weights) - they go to AdamW, not Muon
+        # Muon requires 2D+ tensors (matrices), so we must separate 1D from 2D+ parameters
+        matrix_params = []
+        block_norm_params = []
+        for p in all_block_params:
+            # Check parameter shape: 2D+ (e.g., [out_features, in_features]) go to Muon
+            # 1D (e.g., [features]) go to AdamW
+            if p.ndim >= 2:  # 2D+ tensors (matrices) go to Muon
+                matrix_params.append(p)
+            elif p.ndim == 1:  # 1D tensors (normalization weights) go to AdamW
+                block_norm_params.append(p)
+            else:  # 0D scalars (shouldn't happen, but handle gracefully)
+                block_norm_params.append(p)
+        
+        # Combine all normalization parameters (from blocks + embedding/final norms)
+        norm_params.extend(block_norm_params)
+        
+        if rank == 0:
+            print(f"Parameter distribution: {len(matrix_params)} matrix params (Muon), {len(norm_params)} norm params (AdamW), {len(embedding_params)} embedding params (AdamW), {len(lm_head_params)} lm_head params (AdamW)")
+        
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params)
+        # Create the AdamW optimizer for the embedding, lm_head, and normalization layers
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         if rank == 0:
@@ -225,6 +295,7 @@ class GPT(nn.Module):
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+            dict(params=norm_params, lr=matrix_lr * dmodel_lr_scale),  # Use matrix_lr for normalization layers
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
         AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
@@ -252,11 +323,12 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Forward the trunk of the Transformer
-        x = self.transformer.wte(idx)
-        x = norm(x)
+        # Apply embedding scaling (sqrt(d_model)) - industry standard (Qwen3, SmolLM, etc.)
+        x = self.transformer.wte(idx) * (self.config.n_embd ** 0.5)
+        x = self.embedding_norm(x)  # Use learnable RMSNorm (consistent with blocks)
         for block in self.transformer.h:
             x = block(x, cos_sin, kv_cache)
-        x = norm(x)
+        x = self.final_norm(x)  # Use learnable RMSNorm (consistent with blocks)
 
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
