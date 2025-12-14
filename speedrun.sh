@@ -16,6 +16,12 @@ export TOKENIZERS_PARALLELISM=false
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
+# Fix CUDA library path issues (common in containers)
+# This ensures PyTorch can find CUDA runtime libraries
+if [ -d "/usr/local/nvidia/lib64" ] || [ -d "/usr/local/nvidia/lib" ]; then
+    export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/local/cuda/lib:${LD_LIBRARY_PATH}"
+fi
+
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
 
@@ -46,10 +52,22 @@ uv sync --extra gpu
 source .venv/bin/activate
 
 # Verify PyTorch CUDA support after installation
+# CRITICAL: Set LD_LIBRARY_PATH before importing torch
 echo "Verifying PyTorch CUDA installation..."
-python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')" || {
-    echo "Warning: Could not verify PyTorch installation"
-}
+python << 'PYEOF'
+import os
+# Set library path BEFORE importing torch
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/local/cuda/lib:' + os.environ.get('LD_LIBRARY_PATH', '')
+
+import torch
+print(f'PyTorch version: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'CUDA version: {torch.version.cuda}')
+    print(f'GPU count: {torch.cuda.device_count()}')
+else:
+    print('CUDA version (compiled): {torch.version.cuda if hasattr(torch.version, "cuda") else "N/A"}')
+PYEOF
 
 # Verify transformers is installed in the venv
 echo "Verifying dependencies..."
