@@ -6,19 +6,40 @@ set -e
 echo "=== RunPod Quick Fix - Get GPUs Working! ==="
 echo ""
 
+# Make sure uv is in PATH
+if ! command -v uv &> /dev/null; then
+    export PATH="$HOME/.local/bin:${PATH}"
+fi
+
+if ! command -v uv &> /dev/null; then
+    echo "ERROR: uv not found. Installing..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:${PATH}"
+fi
+
 source .venv/bin/activate
 
 # Set library paths
 export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/local/cuda/lib:${LD_LIBRARY_PATH}"
 
 echo "1. Removing incompatible PyTorch 2.8.0 (CUDA 12.8)..."
-uv pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
+if command -v uv &> /dev/null; then
+    uv pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
+else
+    pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
+fi
 
 echo ""
 echo "2. Installing PyTorch 2.4.0 with CUDA 12.1 (compatible with your container's CUDA 12.4.1)..."
-uv pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-    --index-url https://download.pytorch.org/whl/cu121 \
-    --no-cache-dir
+if command -v uv &> /dev/null; then
+    uv pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        --no-cache-dir
+else
+    pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        --no-cache-dir
+fi
 
 echo ""
 echo "3. Testing CUDA..."
