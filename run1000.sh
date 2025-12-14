@@ -8,7 +8,14 @@
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+if ! command -v uv &> /dev/null; then
+    echo "ERROR: uv is not available in PATH. Please ensure ~/.local/bin is in your PATH."
+    exit 1
+fi
 [ -d ".venv" ] || uv venv
 uv sync --extra gpu
 source .venv/bin/activate
