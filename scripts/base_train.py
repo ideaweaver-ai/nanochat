@@ -142,50 +142,12 @@ if resuming:
     del model_data # free up this memory after the copy
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-# Try to compile the model for better performance, but fall back to eager if compilation fails
-# (e.g., if Python dev headers are missing or on CPU without proper setup)
-# First check if Python headers are available (needed for Triton compilation)
-python_headers_available = False
-import sys
-import sysconfig
-
-# Try to find Python.h using sysconfig (most reliable)
-try:
-    include_dir = sysconfig.get_path('include')
-    python_h_path = os.path.join(include_dir, 'Python.h')
-    if os.path.exists(python_h_path):
-        python_headers_available = True
-        print0(f"Found Python headers at: {python_h_path}")
-except:
-    pass
-
-# Fallback: check common locations
-if not python_headers_available:
-    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    for header_path in [f"/usr/include/python{python_version}/Python.h", 
-                        f"/usr/local/include/python{python_version}/Python.h",
-                        "/usr/include/python3.10/Python.h",
-                        "/usr/include/python3.11/Python.h",
-                        "/usr/include/python3.12/Python.h"]:
-        if os.path.exists(header_path):
-            python_headers_available = True
-            print0(f"Found Python headers at: {header_path}")
-            break
-
-if python_headers_available:
-    try:
-        model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
-        print0("Model compiled successfully with torch.compile()")
-    except Exception as e:
-        print0(f"Warning: torch.compile() failed ({type(e).__name__}), falling back to eager mode")
-        print0(f"  Error: {e}")
-        print0("  This is OK - model will run in eager mode (slightly slower but functional)")
-        # Model stays uncompiled (eager mode)
-else:
-    print0("Skipping torch.compile() - Python development headers not found")
-    print0("  Install with: apt-get install -y python3-dev build-essential")
-    print0("  Model will run in eager mode (slightly slower but functional)")
-    # Model stays uncompiled (eager mode)
+# DISABLED: torch.compile() is causing Triton block size errors
+# Training will run in eager mode (slightly slower but fully functional)
+# This avoids issues with Triton compilation, Python headers, and block size limits
+print0("Running in eager mode (torch.compile() disabled to avoid Triton compilation issues)")
+print0("  Model will train successfully, just slightly slower than compiled mode")
+# Model stays uncompiled (eager mode)
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()

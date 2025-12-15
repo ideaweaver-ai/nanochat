@@ -96,9 +96,18 @@ def build_model(checkpoint_dir, step, device, phase):
 
 def find_largest_model(checkpoints_dir):
     # attempt to guess the model tag: take the biggest model available
+    if not os.path.exists(checkpoints_dir):
+        raise FileNotFoundError(
+            f"Checkpoint directory does not exist: {checkpoints_dir}\n"
+            f"  This usually means training hasn't started yet or crashed before creating checkpoints.\n"
+            f"  Run base training first to create checkpoints."
+        )
     model_tags = [f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))]
     if not model_tags:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}")
+        raise FileNotFoundError(
+            f"No checkpoints found in {checkpoints_dir}\n"
+            f"  Training may not have completed yet or no checkpoints were saved."
+        )
     # 1) normally all model tags are of the form d<number>, try that first:
     candidates = []
     for model_tag in model_tags:
