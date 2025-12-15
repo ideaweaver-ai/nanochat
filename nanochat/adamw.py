@@ -16,7 +16,6 @@ class DistAdamW(torch.optim.Optimizer):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(param_groups, defaults)
 
-    @torch.compile
     @torch.no_grad()
     def step(self):
         rank = dist.get_rank()
@@ -24,29 +23,54 @@ class DistAdamW(torch.optim.Optimizer):
         reduce_scatter_futures: list[torch.Future] = []
         all_reduce_futures: list[torch.Future] = []
         grad_slices = []
+        use_all_reduce = []  # Track which params use all_reduce vs reduce_scatter
         for group in self.param_groups:
             params: list[Tensor] = group["params"]
             for base_i in range(len(params)):
                 grad = params[base_i].grad
-                rank_size = grad.shape[0] // world_size
-                grad_slice = torch.empty_like(grad[:rank_size])
-                reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
-                grad_slices.append(grad_slice)
+                # Check if first dimension is divisible by world_size
+                if grad.shape[0] % world_size == 0:
+                    # Use reduce_scatter for memory efficiency
+                    rank_size = grad.shape[0] // world_size
+                    grad_slice = torch.empty_like(grad[:rank_size])
+                    reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
+                    grad_slices.append(grad_slice)
+                    use_all_reduce.append(False)
+                else:
+                    # Use all_reduce for parameters that don't divide evenly
+                    # This is less memory efficient but necessary for correctness
+                    all_reduce_futures.append(dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
+                    grad_slices.append(grad)  # Use full grad for all_reduce
+                    use_all_reduce.append(True)
 
         idx = 0
+        reduce_scatter_idx = 0
+        all_reduce_grad_idx = 0
+        all_gather_futures = []
         for group in self.param_groups:
             beta1, beta2 = group['betas']
             eps = group['eps']
             wd = group['weight_decay']
             params = group['params']
             for base in range(len(params)):
-                reduce_scatter_futures[idx].wait()
                 p = params[base]
-                rank_size = p.shape[0] // world_size
-                p_slice = p[rank * rank_size:(rank + 1) * rank_size]
                 lr = group['lr'] * getattr(p, "lr_mul", 1.0)
+                
+                if use_all_reduce[idx]:
+                    # Wait for all_reduce to complete
+                    all_reduce_futures[all_reduce_grad_idx].wait()
+                    all_reduce_grad_idx += 1
+                    g_slice = grad_slices[idx]  # Full gradient after all_reduce
+                    p_slice = p  # Use full parameter
+                else:
+                    # Wait for reduce_scatter to complete
+                    reduce_scatter_futures[reduce_scatter_idx].wait()
+                    reduce_scatter_idx += 1
+                    rank_size = p.shape[0] // world_size
+                    p_slice = p[rank * rank_size:(rank + 1) * rank_size]
+                    g_slice = grad_slices[idx]  # Sharded gradient
+                
                 state = self.state[p]
-                g_slice = grad_slices[idx]
                 # State init
                 if not state:
                     state['step'] = torch.tensor(0, dtype=torch.int64, device=p.device)
@@ -71,6 +95,10 @@ class DistAdamW(torch.optim.Optimizer):
                 step_size = lr * (torch.sqrt(bias2) / bias1)
                 update = exp_avg.div(denom).mul_(step_size)
                 p_slice.add_(other=update, alpha=-1.0)
+                
+                # Gather parameters back if we used reduce_scatter
+                if not use_all_reduce[idx]:
+                    all_gather_futures.append(dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future())
+                
                 idx += 1
-                all_reduce_futures.append(dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future())
-        torch.futures.collect_all(all_reduce_futures).wait()
+        torch.futures.collect_all(all_gather_futures).wait()

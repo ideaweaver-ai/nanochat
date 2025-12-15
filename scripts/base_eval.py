@@ -165,10 +165,25 @@ def main():
         model_name = hf_path # just for logging
         model_slug = hf_path.replace("/", "-") # for the output csv file
     else:
-        # load a local model from the file system
-        model, tokenizer, meta = load_model("base", device, phase="eval")
-        model_name = f"base_model (step {meta['step']})" # just for logging
-        model_slug = f"base_model_{meta['step']:06d}" # for the output csv file
+        # Check if checkpoints exist before trying to load
+        import os
+        base_dir = get_base_dir()
+        checkpoints_dir = os.path.join(base_dir, "base_checkpoints")
+        if not os.path.exists(checkpoints_dir):
+            print0(f"WARNING: Checkpoint directory does not exist: {checkpoints_dir}")
+            print0("  Training may not have completed yet. Skipping base_eval evaluation.")
+            compute_cleanup()
+            return
+        try:
+            # load a local model from the file system
+            model, tokenizer, meta = load_model("base", device, phase="eval")
+            model_name = f"base_model (step {meta['step']})" # just for logging
+            model_slug = f"base_model_{meta['step']:06d}" # for the output csv file
+        except FileNotFoundError as e:
+            print0(f"WARNING: Could not load model checkpoint: {e}")
+            print0("  Training may not have completed yet. Skipping base_eval evaluation.")
+            compute_cleanup()
+            return
 
     # Evaluate the model
     with autocast_ctx:
