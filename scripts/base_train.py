@@ -19,6 +19,12 @@ from contextlib import nullcontext
 import wandb
 import torch
 
+# Clear GPU cache at startup to avoid OOM
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(i)
+
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
@@ -72,6 +78,17 @@ user_config = {k: globals()[k] for k in config_keys} # will be useful for loggin
 device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+
+# Clear GPU memory before training
+if device_type == "cuda":
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(i)
+    if master_process:
+        free_mem = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+        print0(f"GPU memory after clearing: {free_mem / 1e9:.2f} GB free")
+
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -230,12 +247,13 @@ else:
 
 # -----------------------------------------------------------------------------
 # Training loop
-while True:
-    last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
-    flops_so_far = num_flops_per_token * total_batch_size * step
+try:
+    while True:
+        last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
+        flops_so_far = num_flops_per_token * total_batch_size * step
 
-    # once in a while: evaluate the val bpb (all ranks participate)
-    if last_step or step % eval_every == 0:
+        # once in a while: evaluate the val bpb (all ranks participate)
+        if last_step or step % eval_every == 0:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
@@ -380,6 +398,20 @@ while True:
 
     # state update
     step += 1
+except KeyboardInterrupt:
+    print0("\nTraining interrupted by user")
+    raise
+except Exception as e:
+    print0(f"\n{'='*80}")
+    print0(f"CRITICAL ERROR during training at step {step}:")
+    print0(f"Error type: {type(e).__name__}")
+    print0(f"Error message: {str(e)}")
+    print0(f"{'='*80}")
+    import traceback
+    print0("Full traceback:")
+    traceback.print_exc()
+    print0(f"{'='*80}")
+    raise
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")

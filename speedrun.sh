@@ -301,12 +301,24 @@ fi
 echo ""
 echo "Using $NPROC_PER_NODE process(es) for training"
 
+# Clear GPU cache before training to avoid OOM
+echo "Clearing GPU cache..."
+python << 'PYEOF'
+import torch
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(i)
+    print(f"GPU cache cleared. Free memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+PYEOF
+
 # pretrain the d16 model (reduced from d20 for parameter efficiency: ~561M params vs ~911M)
 # GQA is enabled in base_train.py (num_kv_heads = num_heads // 2) for additional parameter reduction
+# Reduced batch size and seq len to avoid OOM on A100 80GB
 if [ "$NPROC_PER_NODE" -gt 1 ]; then
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --run=$WANDB_RUN
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=16 --device_batch_size=16 --max_seq_len=1024 --run=$WANDB_RUN
 else
-    "$(pwd)/.venv/bin/python" -m scripts.base_train --depth=16 --run=$WANDB_RUN
+    "$(pwd)/.venv/bin/python" -m scripts.base_train --depth=16 --device_batch_size=16 --max_seq_len=1024 --run=$WANDB_RUN
 fi
 
 # evaluate the model on a larger chunk of train/val data and draw some samples
