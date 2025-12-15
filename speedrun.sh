@@ -25,20 +25,49 @@ fi
 # -----------------------------------------------------------------------------
 # Install system dependencies needed for PyTorch compilation (Python dev headers)
 # Required for torch.compile() to work, especially in CPU mode
-if ! [ -f "/usr/include/python3.10/Python.h" ] && ! [ -f "/usr/include/python3.11/Python.h" ] && ! [ -f "/usr/include/python3.12/Python.h" ]; then
+PYTHON_VERSION=$(python3 --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || echo "3.10")
+PYTHON_MAJOR=$(echo $PYTHON_VERSION | cut -d. -f1)
+PYTHON_MINOR=$(echo $PYTHON_VERSION | cut -d. -f2)
+
+# Check if Python headers exist
+PYTHON_HEADERS_FOUND=false
+for path in "/usr/include/python${PYTHON_VERSION}/Python.h" \
+            "/usr/local/include/python${PYTHON_VERSION}/Python.h" \
+            "/usr/include/python${PYTHON_MAJOR}.${PYTHON_MINOR}/Python.h" \
+            "/usr/include/python3.10/Python.h" \
+            "/usr/include/python3.11/Python.h" \
+            "/usr/include/python3.12/Python.h"; do
+    if [ -f "$path" ]; then
+        PYTHON_HEADERS_FOUND=true
+        break
+    fi
+done
+
+if [ "$PYTHON_HEADERS_FOUND" = "false" ]; then
     echo "Installing Python development headers (needed for torch.compile)..."
     if command -v apt-get &> /dev/null; then
-        apt-get update -qq && apt-get install -y python3-dev build-essential 2>/dev/null || {
-            echo "Warning: Could not install python3-dev. torch.compile() may fail."
+        apt-get update -qq
+        apt-get install -y python3-dev build-essential 2>&1 | grep -v "^\(Reading\|Building\|Get\)" || {
+            echo "Warning: Could not install python3-dev. torch.compile() will be skipped."
             echo "  You can install manually: apt-get install -y python3-dev build-essential"
         }
+        # Verify installation
+        if [ -f "/usr/include/python${PYTHON_VERSION}/Python.h" ] || \
+           [ -f "/usr/include/python${PYTHON_MAJOR}.${PYTHON_MINOR}/Python.h" ]; then
+            echo "✓ Python development headers installed successfully"
+        else
+            echo "⚠ Python headers still not found after installation attempt"
+        fi
     elif command -v yum &> /dev/null; then
-        yum install -y python3-devel gcc gcc-c++ 2>/dev/null || {
-            echo "Warning: Could not install python3-devel. torch.compile() may fail."
+        yum install -y python3-devel gcc gcc-c++ 2>&1 | grep -v "^\(Loaded\|Installing\|Updating\)" || {
+            echo "Warning: Could not install python3-devel. torch.compile() will be skipped."
         }
     else
-        echo "Warning: Cannot auto-install python3-dev. Please install manually."
+        echo "Warning: Cannot auto-install python3-dev. torch.compile() will be skipped."
+        echo "  Please install manually: apt-get install -y python3-dev build-essential"
     fi
+else
+    echo "✓ Python development headers found"
 fi
 
 # -----------------------------------------------------------------------------

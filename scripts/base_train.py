@@ -144,13 +144,32 @@ if resuming:
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
 # Try to compile the model for better performance, but fall back to eager if compilation fails
 # (e.g., if Python dev headers are missing or on CPU without proper setup)
-try:
-    model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
-    print0("Model compiled successfully with torch.compile()")
-except Exception as e:
-    print0(f"Warning: torch.compile() failed ({type(e).__name__}), falling back to eager mode")
-    print0(f"  Error: {e}")
-    print0("  This is OK - model will run in eager mode (slightly slower but functional)")
+# First check if Python headers are available (needed for Triton compilation)
+python_headers_available = False
+import sys
+python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+for header_path in [f"/usr/include/python{python_version}/Python.h", 
+                    f"/usr/local/include/python{python_version}/Python.h",
+                    "/usr/include/python3.10/Python.h",
+                    "/usr/include/python3.11/Python.h",
+                    "/usr/include/python3.12/Python.h"]:
+    if os.path.exists(header_path):
+        python_headers_available = True
+        break
+
+if python_headers_available:
+    try:
+        model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+        print0("Model compiled successfully with torch.compile()")
+    except Exception as e:
+        print0(f"Warning: torch.compile() failed ({type(e).__name__}), falling back to eager mode")
+        print0(f"  Error: {e}")
+        print0("  This is OK - model will run in eager mode (slightly slower but functional)")
+        # Model stays uncompiled (eager mode)
+else:
+    print0("Skipping torch.compile() - Python development headers not found")
+    print0("  Install with: apt-get install -y python3-dev build-essential")
+    print0("  Model will run in eager mode (slightly slower but functional)")
     # Model stays uncompiled (eager mode)
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
