@@ -22,8 +22,7 @@ import torch
 # Clear GPU cache at startup to avoid OOM
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
-    for i in range(torch.cuda.device_count()):
-        torch.cuda.reset_peak_memory_stats(i)
+    torch.cuda.synchronize()
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
