@@ -34,6 +34,14 @@ class DistAdamW(torch.optim.Optimizer):
                     param_info.append((False, -1))  # No grad, skip
                     continue
                 
+                # For scalars or 0D tensors, use all_reduce
+                if grad.ndim == 0:
+                    future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                    all_reduce_futures.append(future)
+                    grad_slices.append(grad)
+                    param_info.append((True, len(grad_slices) - 1))
+                    continue
+                
                 # Check if first dimension is divisible by world_size
                 if grad.shape[0] % world_size == 0:
                     # Use reduce_scatter for memory efficiency
