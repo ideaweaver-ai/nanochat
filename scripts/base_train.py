@@ -83,8 +83,6 @@ master_process = ddp_rank == 0 # this process will do logging, checkpointing etc
 if device_type == "cuda":
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
-    for i in range(torch.cuda.device_count()):
-        torch.cuda.reset_peak_memory_stats(i)
     if master_process:
         free_mem = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
         print0(f"GPU memory after clearing: {free_mem / 1e9:.2f} GB free")
@@ -254,150 +252,150 @@ try:
 
         # once in a while: evaluate the val bpb (all ranks participate)
         if last_step or step % eval_every == 0:
-        model.eval()
-        val_loader = build_val_loader()
-        eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-        with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
-        if val_bpb < min_val_bpb:
-            min_val_bpb = val_bpb
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "val/bpb": val_bpb,
-        })
-        model.train()
-
-    # once in a while: estimate the CORE metric (all ranks participate)
-    # use the original uncompiled model because the inputs keep changing shape
-    results = {}
-    if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
-        model.eval()
-        with autocast_ctx:
-            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "core_metric": results["core_metric"],
-            "centered_results": results["centered_results"],
-        })
-        model.train()
-
-    # once in a while: sample from the model (only on master process)
-    # use the original uncompiled model because the inputs keep changing shape
-    if master_process and (last_step or (step > 0 and step % sample_every == 0)):
-        model.eval()
-        prompts = [
-            "The capital of France is",
-            "The chemical symbol of gold is",
-            "If yesterday was Friday, then tomorrow will be",
-            "The opposite of hot is",
-            "The planets of the solar system are:",
-            "My favorite color is",
-            "If 5*x + 3 = 13, then x is",
-        ]
-        engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
-        for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
+            model.eval()
+            val_loader = build_val_loader()
+            eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
             with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
-        model.train()
-
-    # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
-    if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            orig_model.state_dict(), # model parameters
-            [opt.state_dict() for opt in optimizers], # optimizer states
-            { # metadata saved as json
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+            if val_bpb < min_val_bpb:
+                min_val_bpb = val_bpb
+            wandb_run.log({
                 "step": step,
-                "val_bpb": val_bpb, # loss at last step
-                "model_config": model_config_kwargs,
-                "user_config": user_config, # inputs to the training script
-                "device_batch_size": device_batch_size,
-                "max_seq_len": max_seq_len,
-                "dataloader_state_dict": dataloader_state_dict,
-                "loop_state": { # all loop state (other than step) so that we can resume training
-                    "min_val_bpb": min_val_bpb,
-                    "smooth_train_loss": smooth_train_loss,
-                    "total_training_time": total_training_time,
+                "total_training_flops": flops_so_far,
+                "total_training_time": total_training_time,
+                "val/bpb": val_bpb,
+            })
+            model.train()
+
+        # once in a while: estimate the CORE metric (all ranks participate)
+        # use the original uncompiled model because the inputs keep changing shape
+        results = {}
+        if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
+            model.eval()
+            with autocast_ctx:
+                results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
+            print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
+            wandb_run.log({
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "core_metric": results["core_metric"],
+                "centered_results": results["centered_results"],
+            })
+            model.train()
+
+        # once in a while: sample from the model (only on master process)
+        # use the original uncompiled model because the inputs keep changing shape
+        if master_process and (last_step or (step > 0 and step % sample_every == 0)):
+            model.eval()
+            prompts = [
+                "The capital of France is",
+                "The chemical symbol of gold is",
+                "If yesterday was Friday, then tomorrow will be",
+                "The opposite of hot is",
+                "The planets of the solar system are:",
+                "My favorite color is",
+                "If 5*x + 3 = 13, then x is",
+            ]
+            engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
+            for prompt in prompts:
+                tokens = tokenizer(prompt, prepend="<|bos|>")
+                with autocast_ctx:
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                print0(tokenizer.decode(sample[0]))
+            model.train()
+
+        # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
+        if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
+            save_checkpoint(
+                checkpoint_dir,
+                step,
+                orig_model.state_dict(), # model parameters
+                [opt.state_dict() for opt in optimizers], # optimizer states
+                { # metadata saved as json
+                    "step": step,
+                    "val_bpb": val_bpb, # loss at last step
+                    "model_config": model_config_kwargs,
+                    "user_config": user_config, # inputs to the training script
+                    "device_batch_size": device_batch_size,
+                    "max_seq_len": max_seq_len,
+                    "dataloader_state_dict": dataloader_state_dict,
+                    "loop_state": { # all loop state (other than step) so that we can resume training
+                        "min_val_bpb": min_val_bpb,
+                        "smooth_train_loss": smooth_train_loss,
+                        "total_training_time": total_training_time,
+                    },
                 },
-            },
-            rank=ddp_rank,
-        )
+                rank=ddp_rank,
+            )
 
-    # termination conditions (TODO: possibly also add loss explosions etc.)
-    if last_step:
-        break
+        # termination conditions (TODO: possibly also add loss explosions etc.)
+        if last_step:
+            break
 
-    # -------------------------------------------------------------------------
-    # single training step
-    # evaluate the gradient
-    synchronize()
-    t0 = time.time()
-    for micro_step in range(grad_accum_steps):
-        with autocast_ctx:
-            loss = model(x, y)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        loss.backward()
-        x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
-    # gradient clipping
-    grad_clip_enabled = grad_clip > 0.0
-    if grad_clip_enabled:
-        grad_norm_tensor = torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
-        grad_norm = grad_norm_tensor.item() # GPU tensor -> CPU float (note: cpu-gpu sync point)
-    # step the optimizers
-    lrm = get_lr_multiplier(step)
-    for opt in optimizers:
-        for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
-    muon_momentum = get_muon_momentum(step)
-    for group in muon_optimizer.param_groups:
-        group["momentum"] = muon_momentum
-    for opt in optimizers:
-        opt.step()
-    model.zero_grad(set_to_none=True)
-    synchronize()
-    t1 = time.time()
-    dt = t1 - t0
-    # -------------------------------------------------------------------------
-
-    # logging
-    ema_beta = 0.9 # EMA decay factor for some smoothing just for nicer logging
-    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
-    pct_done = 100 * step / num_iterations
-    tok_per_sec = int(total_batch_size / dt)
-    flops_per_sec = num_flops_per_token * total_batch_size / dt
-    promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
-    mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
-    if step > 10:
-        total_training_time += dt # only count the time after the first 10 steps
-    print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
-    if step % 100 == 0:
-        log_data = {
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "train/loss": debiased_smooth_loss,
-            "train/lrm": lrm,
-            "train/dt": dt,
-            "train/tok_per_sec": tok_per_sec,
-            "train/mfu": mfu,
-        }
+        # -------------------------------------------------------------------------
+        # single training step
+        # evaluate the gradient
+        synchronize()
+        t0 = time.time()
+        for micro_step in range(grad_accum_steps):
+            with autocast_ctx:
+                loss = model(x, y)
+            train_loss = loss.detach() # for logging
+            loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+            loss.backward()
+            x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        # gradient clipping
+        grad_clip_enabled = grad_clip > 0.0
         if grad_clip_enabled:
-            log_data["train/grad_norm"] = grad_norm
-        wandb_run.log(log_data)
+            grad_norm_tensor = torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
+            grad_norm = grad_norm_tensor.item() # GPU tensor -> CPU float (note: cpu-gpu sync point)
+        # step the optimizers
+        lrm = get_lr_multiplier(step)
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["lr"] = group["initial_lr"] * lrm
+        muon_momentum = get_muon_momentum(step)
+        for group in muon_optimizer.param_groups:
+            group["momentum"] = muon_momentum
+        for opt in optimizers:
+            opt.step()
+        model.zero_grad(set_to_none=True)
+        synchronize()
+        t1 = time.time()
+        dt = t1 - t0
+        # -------------------------------------------------------------------------
 
-    # state update
-    step += 1
+        # logging
+        ema_beta = 0.9 # EMA decay factor for some smoothing just for nicer logging
+        smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
+        debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
+        pct_done = 100 * step / num_iterations
+        tok_per_sec = int(total_batch_size / dt)
+        flops_per_sec = num_flops_per_token * total_batch_size / dt
+        promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
+        mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
+        if step > 10:
+            total_training_time += dt # only count the time after the first 10 steps
+        print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
+        print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+        if step % 100 == 0:
+            log_data = {
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "total_training_time": total_training_time,
+                "train/loss": debiased_smooth_loss,
+                "train/lrm": lrm,
+                "train/dt": dt,
+                "train/tok_per_sec": tok_per_sec,
+                "train/mfu": mfu,
+            }
+            if grad_clip_enabled:
+                log_data["train/grad_norm"] = grad_norm
+            wandb_run.log(log_data)
+
+        # state update
+        step += 1
 except KeyboardInterrupt:
     print0("\nTraining interrupted by user")
     raise

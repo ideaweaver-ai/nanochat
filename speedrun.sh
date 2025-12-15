@@ -307,8 +307,7 @@ python << 'PYEOF'
 import torch
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
-    for i in range(torch.cuda.device_count()):
-        torch.cuda.reset_peak_memory_stats(i)
+    torch.cuda.synchronize()
     print(f"GPU cache cleared. Free memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 PYEOF
 
