@@ -24,10 +24,17 @@ class DistAdamW(torch.optim.Optimizer):
         all_reduce_futures: list[torch.Future] = []
         grad_slices = []
         use_all_reduce = []  # Track which params use all_reduce vs reduce_scatter
+        param_has_grad = []  # Track which params have gradients
         for group in self.param_groups:
             params: list[Tensor] = group["params"]
             for base_i in range(len(params)):
                 grad = params[base_i].grad
+                if grad is None:
+                    param_has_grad.append(False)
+                    use_all_reduce.append(False)  # Placeholder, won't be used
+                    grad_slices.append(None)  # Placeholder
+                    continue  # Skip parameters without gradients
+                param_has_grad.append(True)
                 # Check if first dimension is divisible by world_size
                 if grad.shape[0] % world_size == 0:
                     # Use reduce_scatter for memory efficiency
@@ -54,6 +61,11 @@ class DistAdamW(torch.optim.Optimizer):
             params = group['params']
             for base in range(len(params)):
                 p = params[base]
+                # Skip parameters without gradients
+                if not param_has_grad[idx]:
+                    idx += 1
+                    continue
+                
                 lr = group['lr'] * getattr(p, "lr_mul", 1.0)
                 
                 if use_all_reduce[idx]:
@@ -101,4 +113,20 @@ class DistAdamW(torch.optim.Optimizer):
                     all_gather_futures.append(dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future())
                 
                 idx += 1
+        
+        # Wait for all gather operations to complete
         torch.futures.collect_all(all_gather_futures).wait()
+        
+        # For all_reduce parameters, we need to synchronize them across ranks
+        # since all ranks updated independently (even though they should be the same)
+        # This ensures numerical consistency
+        idx = 0
+        for group in self.param_groups:
+            params = group['params']
+            for base in range(len(params)):
+                if param_has_grad[idx] and use_all_reduce[idx]:
+                    p = params[base]
+                    # All-reduce the parameter to ensure all ranks have the same values
+                    # This handles any small numerical differences
+                    dist.all_reduce(p, op=dist.ReduceOp.AVG)
+                idx += 1
