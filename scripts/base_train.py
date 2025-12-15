@@ -147,15 +147,30 @@ orig_model = model # original, uncompiled model, for saving raw model state_dict
 # First check if Python headers are available (needed for Triton compilation)
 python_headers_available = False
 import sys
-python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-for header_path in [f"/usr/include/python{python_version}/Python.h", 
-                    f"/usr/local/include/python{python_version}/Python.h",
-                    "/usr/include/python3.10/Python.h",
-                    "/usr/include/python3.11/Python.h",
-                    "/usr/include/python3.12/Python.h"]:
-    if os.path.exists(header_path):
+import sysconfig
+
+# Try to find Python.h using sysconfig (most reliable)
+try:
+    include_dir = sysconfig.get_path('include')
+    python_h_path = os.path.join(include_dir, 'Python.h')
+    if os.path.exists(python_h_path):
         python_headers_available = True
-        break
+        print0(f"Found Python headers at: {python_h_path}")
+except:
+    pass
+
+# Fallback: check common locations
+if not python_headers_available:
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    for header_path in [f"/usr/include/python{python_version}/Python.h", 
+                        f"/usr/local/include/python{python_version}/Python.h",
+                        "/usr/include/python3.10/Python.h",
+                        "/usr/include/python3.11/Python.h",
+                        "/usr/include/python3.12/Python.h"]:
+        if os.path.exists(header_path):
+            python_headers_available = True
+            print0(f"Found Python headers at: {header_path}")
+            break
 
 if python_headers_available:
     try:
